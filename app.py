@@ -66,6 +66,17 @@ def apply_global_style() -> None:
       .stRadio label { font-family: 'DM Sans', sans-serif; }
       .app-hero-title { font-family: 'Playfair Display', serif; font-size: 2.4rem; font-weight: 800; letter-spacing: -0.03em; }
       .app-subtle { color: #6b7280; font-size: 0.95rem; }
+
+      /* FIX FORM LABEL VISIBILITY */
+      div[data-testid="stWidgetLabel"] label,
+      div[data-testid="stWidgetLabel"] p,
+      .stTextInput label,
+      .stSelectbox label,
+      .stRadio label {
+        color: #111111 !important;
+        opacity: 1 !important;
+        font-weight: 600 !important;
+      }
     </style>
     """, unsafe_allow_html=True)
 
