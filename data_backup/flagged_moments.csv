@@ -1,0 +1,5 @@
+driver_id,timestamp,event_type
+D001,2024-01-01 08:00:00,harsh_braking
+D001,2024-01-02 10:00:00,overspeed
+D001,2024-01-03 09:30:00,distraction
+D002,2024-01-01 07:30:00,harsh_braking

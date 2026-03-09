@@ -1,0 +1,23 @@
+# Byte‑compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environment
+venv/
+
+# Streamlit cache
+.streamlit/
+
+# SQLite database (created at runtime)
+database/*.db
+
+# Model files (will be provided by ML teams)
+models/*.pkl
+
+# Jupyter notebooks and IPython history
+.ipynb_checkpoints
+
+# OS files
+*.DS_Store
+Thumbs.db
