@@ -77,6 +77,24 @@ def apply_global_style() -> None:
         opacity: 1 !important;
         font-weight: 600 !important;
       }
+                
+      /* FIX TEXT CURSOR / CARET VISIBILITY */
+     .stTextInput input,
+     .stTextArea textarea,
+     input[type="text"],
+     input[type="password"],
+     input[type="email"] {
+     color: #111111 !important;
+     caret-color: #111111 !important;
+         }
+     .stTextInput input::selection,
+    .stTextArea textarea::selection,
+    input[type="text"]::selection,
+    input[type="password"]::selection,
+    input[type="email"]::selection {
+    background: #dbeafe !important;
+    color: #111111 !important;
+        
     </style>
     """, unsafe_allow_html=True)
 
