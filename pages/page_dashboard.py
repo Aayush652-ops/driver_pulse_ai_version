@@ -1,19 +1,18 @@
 """
 Implementation of the "My Dashboard" page for DriverPulse AI.
 
-This page aggregates a driver's profile, trip summaries, earnings and
-safety data into a succinct overview. Key performance indicators are
-styled to match the editorial look of the Driving Behaviour page.
+This page aggregates a driver's profile, earnings, safety, burnout,
+and AI insights into a single summary view. It uses the SAME analytics
+modules as the detailed pages so values stay consistent across the app.
 """
 
 import streamlit as st
 
-from utils.data_loader import load_data, filter_by_driver
-from utils.analytics import (
-    calculate_safety_score,
-    calculate_burnout_probability,
-    calculate_goal_progress,
-)
+from utils.data_loader import load_all_data, get_driver_data
+from utils.feature_engineering import build_driver_safety_profile
+from models.risk_model import compute_risk_score
+from utils.earnings_analytics import build_earnings_profile
+from utils.burnout_detection import build_burnout_profile
 
 
 def run(driver_id: str) -> None:
@@ -51,97 +50,118 @@ def run(driver_id: str) -> None:
         unsafe_allow_html=True,
     )
 
-    # Load datasets
-    drivers = load_data("drivers.csv")
-    trips = load_data("trip_summaries.csv")
-    raw_trips = load_data("trips.csv")
-    earnings_log = load_data("earnings_velocity_log.csv")
-    flagged = load_data("flagged_moments.csv")
-    accel = load_data("accelerometer_data.csv")
-    audio = load_data("audio_intensity_data.csv")
-    goals = load_data("driver_goals.csv")
+    # Unified data loading
+    data = load_all_data()
+    driver_data = get_driver_data(driver_id, data)
+    driver_profile = driver_data.get("driver", {})
 
-    # Filter by driver ID
-    driver_profile = filter_by_driver(drivers, driver_id)
-    driver_trips = filter_by_driver(trips, driver_id)
-    driver_raw_trips = filter_by_driver(raw_trips, driver_id)
-    driver_earnings_log = filter_by_driver(earnings_log, driver_id)
-    driver_flagged = filter_by_driver(flagged, driver_id)
-    driver_accel = filter_by_driver(accel, driver_id)
-    driver_audio = filter_by_driver(audio, driver_id)
-    driver_goals = filter_by_driver(goals, driver_id)
-
-    if driver_profile.empty:
+    if not driver_profile:
         st.error(f"No driver found with ID {driver_id}.")
         return
 
-    # Extract basic profile info
-    name = driver_profile.iloc[0].get("name", "Unknown")
-    rating = float(driver_profile.iloc[0].get("rating", 0))
-    city = driver_profile.iloc[0].get("city", "Unknown")
+    # Basic info
+    name = driver_profile.get("name", "Unknown")
+    rating = float(driver_profile.get("rating", 0))
+    city = driver_profile.get("city", "Unknown")
 
-    # Compute KPI values
-    total_trips = int(len(driver_trips))
-    if not driver_trips.empty:
-        if "earnings" in driver_trips.columns:
-            total_earnings = float(driver_trips["earnings"].astype(float).sum())
-        elif "fare" in driver_trips.columns:
-            total_earnings = float(driver_trips["fare"].astype(float).sum())
-        else:
-            total_earnings = 0.0
-    else:
-        total_earnings = 0.0
+    driver_trips = driver_data.get("trips")
+    driver_flags = driver_data.get("flags")
+    driver_goals = driver_data.get("goals")
+    driver_velocity = driver_data.get("velocity")
 
-    current_week_earnings = (
-        float(driver_earnings_log["earnings_velocity"].astype(float).iloc[-1])
-        if not driver_earnings_log.empty
-        else 0.0
+    # SAFETY — same logic as Safety page
+    safety_profile = build_driver_safety_profile(
+        driver_id,
+        data["trips"],
+        driver_data["acc"],
+        driver_data["aud"],
+        driver_flags,
+    )
+    risk_result = compute_risk_score(safety_profile)
+    safety_score = float(risk_result.get("risk_score", 0))
+    risk_category = risk_result.get("risk_category", "Unknown")
+
+    # EARNINGS / GOALS — same logic as Earnings page
+    earnings_profile = build_earnings_profile(driver_data)
+    total_trips = int(earnings_profile.get("trips_completed", 0))
+    total_earnings = float(earnings_profile.get("current_earnings", 0))
+    current_velocity = float(earnings_profile.get("current_velocity", 0))
+
+    goal_info = earnings_profile.get("goal", {})
+    trip_pct = float(goal_info.get("trip_progress_pct", 0))
+    earn_pct = float(goal_info.get("progress_pct", 0))
+
+    # If trip_progress_pct isn't available, fall back gracefully
+    if trip_pct == 0 and goal_info.get("has_goal", False):
+        target_trips = float(goal_info.get("target_trips", 0))
+        if target_trips > 0:
+            trip_pct = min(100.0, (total_trips / target_trips) * 100)
+
+    # BURNOUT — same logic as Burnout page
+    burnout_profile = build_burnout_profile(driver_data)
+    burnout_score = float(
+        burnout_profile.get("burnout_score", burnout_profile.get("risk_score", 0))
+    )
+    burnout_level = burnout_profile.get(
+        "risk_level", burnout_profile.get("burnout_level", "Low")
     )
 
-    safety_score, risk_category = calculate_safety_score(driver_flagged, driver_accel, driver_audio)
-    burnout_prob = calculate_burnout_probability(driver_earnings_log, driver_trips)
-    trip_pct, earn_pct = calculate_goal_progress(driver_trips, driver_goals)
-
-    # Build AI insights
+    # AI Insights
     insights = []
-    avg_fare = float(driver_trips["fare"].mean()) if (not driver_trips.empty and "fare" in driver_trips.columns) else 0.0
-    fleet_avg_fare = float(trips["fare"].mean()) if (not trips.empty and "fare" in trips.columns) else 0.0
 
+    avg_fare = 0.0
+    fleet_avg_fare = 0.0
     best_window = None
-    if not driver_raw_trips.empty and "start_time" in driver_raw_trips.columns:
-        time_df = driver_raw_trips.copy()
-        time_df["hour"] = time_df["start_time"].astype(str).str.slice(0, 2).astype(int)
 
-        def bucket(h):
-            if 6 <= h < 11:
-                return "Morning (6–11 AM)"
-            if 11 <= h < 17:
-                return "Afternoon (11 AM–5 PM)"
-            if 17 <= h < 22:
-                return "Evening (5–10 PM)"
-            return "Night (10 PM–6 AM)"
+    if driver_trips is not None and not driver_trips.empty and "fare" in driver_trips.columns:
+        avg_fare = float(driver_trips["fare"].mean())
 
-        time_df["window"] = time_df["hour"].apply(bucket)
-        best_by_window = time_df.groupby("window")["fare"].mean().sort_values(ascending=False)
-        if not best_by_window.empty:
-            best_window = best_by_window.index[0]
-            insights.append({
-                "icon": "💰",
-                "title": "Peak earning window",
-                "body": f"Your strongest earning window is {best_window}. Average fare there is ₹{best_by_window.iloc[0]:.0f} per trip.",
-            })
+    if data["trips"] is not None and not data["trips"].empty and "fare" in data["trips"].columns:
+        fleet_avg_fare = float(data["trips"]["fare"].mean())
+
+    if driver_trips is not None and not driver_trips.empty and "start_time" in driver_trips.columns:
+        time_df = driver_trips.copy()
+        try:
+            time_df["hour"] = time_df["start_time"].astype(str).str.slice(0, 2).astype(int)
+
+            def bucket(h):
+                if 6 <= h < 11:
+                    return "Morning (6–11 AM)"
+                if 11 <= h < 17:
+                    return "Afternoon (11 AM–5 PM)"
+                if 17 <= h < 22:
+                    return "Evening (5–10 PM)"
+                return "Night (10 PM–6 AM)"
+
+            time_df["window"] = time_df["hour"].apply(bucket)
+            best_by_window = time_df.groupby("window")["fare"].mean().sort_values(ascending=False)
+
+            if not best_by_window.empty:
+                best_window = best_by_window.index[0]
+                insights.append({
+                    "icon": "💰",
+                    "title": "Peak earning window",
+                    "body": f"Your strongest earning window is {best_window}. Average fare there is ₹{best_by_window.iloc[0]:.0f} per trip.",
+                })
+        except Exception:
+            pass
 
     harsh_count = 0
     audio_count = 0
-    if not driver_flagged.empty and "flag_type" in driver_flagged.columns:
-        harsh_count = int(driver_flagged[driver_flagged["flag_type"].isin(["moderate_brake", "harsh_braking", "harsh_brake"])].shape[0])
-        audio_count = int(driver_flagged[driver_flagged["flag_type"].isin(["audio_spike", "conflict_moment", "sustained_stress"])].shape[0])
+    if driver_flags is not None and not driver_flags.empty and "flag_type" in driver_flags.columns:
+        harsh_count = int(driver_flags[driver_flags["flag_type"].isin(
+            ["moderate_brake", "harsh_braking", "harsh_brake"]
+        )].shape[0])
 
-    if harsh_count > 2 or safety_score < 60:
+        audio_count = int(driver_flags[driver_flags["flag_type"].isin(
+            ["audio_spike", "conflict_moment", "sustained_stress"]
+        )].shape[0])
+
+    if harsh_count > 2 or safety_score >= 65:
         insights.append({
             "icon": "🛡️",
             "title": "Safety coaching",
-            "body": f"{harsh_count} harsh braking events were detected. Smoother braking will help lift your safety score from {safety_score:.0f}.",
+            "body": f"{harsh_count} harsh braking events were detected. Smoother braking will help reduce your risk score from {safety_score:.0f}.",
         })
     else:
         insights.append({
@@ -150,21 +170,21 @@ def run(driver_id: str) -> None:
             "body": f"Your current safety profile is {risk_category.lower()} risk with a score of {safety_score:.0f}. Keep the same smooth driving pattern.",
         })
 
-    if burnout_prob >= 60:
+    if burnout_score >= 60:
         insights.append({
             "icon": "🧘",
             "title": "Fatigue warning",
-            "body": f"Burnout risk is {burnout_prob:.0f}%. A 15–20 minute break before the next long stretch is recommended.",
+            "body": f"Burnout risk is {burnout_score:.0f}%. A 15–20 minute break before the next long stretch is recommended.",
         })
     else:
         insights.append({
             "icon": "⚡",
             "title": "Energy check",
-            "body": f"Burnout risk is currently {burnout_prob:.0f}%, which is manageable. Short breaks between trips will keep it low.",
+            "body": f"Burnout risk is currently {burnout_score:.0f}%, which is manageable. Short breaks between trips will keep it low.",
         })
 
-    if earn_pct < 100 and not driver_goals.empty and "target_earnings" in driver_goals.columns:
-        target_earnings = float(driver_goals.iloc[0]["target_earnings"])
+    if goal_info.get("has_goal", False) and "target_earnings" in goal_info:
+        target_earnings = float(goal_info.get("target_earnings", 0))
         remaining = max(target_earnings - total_earnings, 0.0)
         insights.append({
             "icon": "🎯",
@@ -182,14 +202,15 @@ def run(driver_id: str) -> None:
 
     insights = insights[:4]
 
-    if not driver_goals.empty and "target_earnings" in driver_goals.columns:
-        target_earnings = float(driver_goals.iloc[0]["target_earnings"])
+    if goal_info.get("has_goal", False) and "target_earnings" in goal_info:
+        target_earnings = float(goal_info.get("target_earnings", 0))
         remaining_earnings = max(target_earnings - total_earnings, 0.0)
         remaining_trips = max(int(round(remaining_earnings / avg_fare)) if avg_fare else 0, 0)
         plan_body = f"Target the {best_window or 'next strong demand window'}. Approx. ₹{remaining_earnings:.0f} remains to hit your goal — about {remaining_trips} more trips at your current average fare."
     else:
         plan_body = f"Prioritize {best_window or 'your strongest demand window'} and keep the current safety pattern steady. Your average fare is ₹{avg_fare:.0f} across {total_trips} trips."
 
+    # Header
     st.markdown(
         f"""
         <div class="dash-hero">
@@ -206,8 +227,10 @@ def run(driver_id: str) -> None:
         unsafe_allow_html=True,
     )
 
+    # KPIs
     st.markdown('<div class="dash-section">Overview</div>', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
+
     c1.markdown(
         f"""
         <div class="dash-card dash-card-dark">
@@ -218,6 +241,7 @@ def run(driver_id: str) -> None:
         """,
         unsafe_allow_html=True,
     )
+
     c2.markdown(
         f"""
         <div class="dash-card">
@@ -228,6 +252,7 @@ def run(driver_id: str) -> None:
         """,
         unsafe_allow_html=True,
     )
+
     c3.markdown(
         f"""
         <div class="dash-card">
@@ -238,18 +263,20 @@ def run(driver_id: str) -> None:
         """,
         unsafe_allow_html=True,
     )
+
     c4.markdown(
         f"""
         <div class="dash-card">
-          <div class="dash-label">Weekly Earnings</div>
-          <div class="dash-value">₹{current_week_earnings:,.0f}</div>
-          <div class="dash-note">Latest velocity log snapshot</div>
+          <div class="dash-label">Current Velocity</div>
+          <div class="dash-value">₹{current_velocity:,.0f}</div>
+          <div class="dash-note">Current earnings pace per hour</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     c5, c6, c7 = st.columns(3)
+
     c5.markdown(
         f"""
         <div class="dash-card">
@@ -260,16 +287,18 @@ def run(driver_id: str) -> None:
         """,
         unsafe_allow_html=True,
     )
+
     c6.markdown(
         f"""
         <div class="dash-card">
           <div class="dash-label">Burnout Risk</div>
-          <div class="dash-value">{burnout_prob:.1f}%</div>
-          <div class="dash-note">Estimated from trips + earnings pace</div>
+          <div class="dash-value">{burnout_score:.1f}%</div>
+          <div class="dash-note">{burnout_level} fatigue profile</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
     c7.markdown(
         f"""
         <div class="dash-card">
@@ -281,11 +310,13 @@ def run(driver_id: str) -> None:
         unsafe_allow_html=True,
     )
 
+    # AI insights
     st.markdown('<div class="dash-section">AI Insights</div>', unsafe_allow_html=True)
     st.markdown(
         f"""<div class="ai-plan"><div class="ai-plan-title">Today's action plan</div><div class="ai-plan-body">{plan_body}</div></div>""",
         unsafe_allow_html=True,
     )
+
     i1, i2, i3, i4 = st.columns(4)
     for col, insight in zip([i1, i2, i3, i4], insights):
         col.markdown(
@@ -299,15 +330,16 @@ def run(driver_id: str) -> None:
             unsafe_allow_html=True,
         )
 
+    # Trends
     st.markdown('<div class="dash-section">Trends</div>', unsafe_allow_html=True)
     ch1, ch2 = st.columns(2)
 
     with ch1:
         st.markdown('<div class="dash-chart"><div class="dash-chart-title">Earnings Velocity Trend</div>', unsafe_allow_html=True)
-        if not driver_earnings_log.empty:
-            chart_data = driver_earnings_log.copy()
-            chart_data["week"] = chart_data["week"].astype(str)
-            chart_data = chart_data.set_index("week")
+        if driver_velocity is not None and not driver_velocity.empty and "timestamp" in driver_velocity.columns and "earnings_velocity" in driver_velocity.columns:
+            chart_data = driver_velocity.copy()
+            chart_data = chart_data.sort_values("timestamp")
+            chart_data = chart_data.set_index("timestamp")
             st.line_chart(chart_data["earnings_velocity"], use_container_width=True)
         else:
             st.info("Earnings velocity data is not available.")
@@ -315,13 +347,8 @@ def run(driver_id: str) -> None:
 
     with ch2:
         st.markdown('<div class="dash-chart"><div class="dash-chart-title">Safety Event Breakdown</div>', unsafe_allow_html=True)
-        event_col = None
-        for candidate in ["event_type", "flag_type"]:
-            if candidate in driver_flagged.columns:
-                event_col = candidate
-                break
-        if not driver_flagged.empty and event_col:
-            event_counts = driver_flagged[event_col].value_counts().rename_axis("event").reset_index(name="count")
+        if driver_flags is not None and not driver_flags.empty and "flag_type" in driver_flags.columns:
+            event_counts = driver_flags["flag_type"].value_counts().rename_axis("event").reset_index(name="count")
             st.bar_chart(event_counts.set_index("event")["count"], use_container_width=True)
         else:
             st.info("No flagged safety events recorded.")
